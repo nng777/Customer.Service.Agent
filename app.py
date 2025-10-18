@@ -182,33 +182,52 @@ class KnowledgeBase:
 
     @staticmethod
     def _sample_data() -> tuple[list[Product], list[FAQ]]:
+        sample_path = Path(__file__).with_name("data.json")
+        try:
+            payload = _read_json(sample_path)
+        except FileNotFoundError:
+            LOGGER.warning(
+                "Sample data file %s not found; returning empty fallback.", sample_path
+            )
+            return [], []
+        except json.JSONDecodeError as exc:
+            LOGGER.error("Failed to parse sample data JSON %s: %s", sample_path, exc)
+            return [], []
+
+        if not isinstance(payload, dict):
+            LOGGER.error("Sample data file %s does not contain an object.", sample_path)
+            return [], []
+
+        raw_products = payload.get("products", [])
+        raw_faqs = payload.get("faqs", [])
+
         products = [
             Product(
-                name="Sepatu Lari AeroX",
-                description="Sepatu lari ringan dengan bantalan responsif untuk pelari jarak jauh.",
-                price="Rp1.299.000",
-                sku="SP-AEROX-001",
-                url="https://contoh-toko.id/produk/sepatu-lari-aerox",
-            ),
-            Product(
-                name="Tas Ransel Harian Urban",
-                description="Tas ransel tahan air dengan kompartemen laptop 15 inci.",
-                price="Rp499.000",
-                sku="TS-URBAN-010",
-                url="https://contoh-toko.id/produk/tas-ransel-urban",
-            ),
+                name=item.get("name", ""),
+                description=item.get("description", ""),
+                price=item.get("price"),
+                sku=item.get("sku"),
+                url=item.get("url"),
+            )
+            for item in raw_products
+            if isinstance(item, dict)
         ]
 
         faqs = [
             FAQ(
-                question="Bagaimana kebijakan pengembalian barang?",
-                answer="Pengembalian dapat dilakukan dalam 14 hari dengan menyertakan bukti pembelian.",
-            ),
-            FAQ(
-                question="Apakah tersedia layanan pengiriman ekspres?",
-                answer="Ya, kami bekerja sama dengan beberapa kurir untuk pengiriman ekspres 1-2 hari kerja.",
-            ),
+                question=item.get("question", ""),
+                answer=item.get("answer", ""),
+            )
+            for item in raw_faqs
+            if isinstance(item, dict)
         ]
+
+        LOGGER.info(
+            "Loaded %d sample products and %d FAQ entries from %s",
+            len(products),
+            len(faqs),
+            sample_path,
+        )
 
         return products, faqs
 
