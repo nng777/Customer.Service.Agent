@@ -1,12 +1,11 @@
 import argparse
-import csv
 import json
 import os
 import textwrap
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import difflib
 import logging
@@ -39,13 +38,6 @@ def _read_text(path: Path) -> str:
 def _read_json(path: Path) -> Any:
     LOGGER.debug("Reading JSON file: %s", path)
     return json.loads(_read_text(path))
-
-
-def _read_csv(path: Path) -> List[Dict[str, str]]:
-    LOGGER.debug("Reading CSV file: %s", path)
-    with path.open(encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        return [dict(row) for row in reader]
 
 
 @dataclass
@@ -104,8 +96,7 @@ class KnowledgeBase:
     ) -> "KnowledgeBase":
         """Load knowledge base content from files.
 
-        ``catalog_path`` can be a CSV or JSON file with product fields.  The JSON
-        format is expected to be a list of objects.  ``faq_path`` may be either a
+        ``catalog_path`` must be a JSON file containing product objects.  ``faq_path`` may be either a
         JSON file containing ``{"question": ..., "answer": ...}`` dictionaries or a
         Markdown file using heading/question pairs.
         """
@@ -123,10 +114,11 @@ class KnowledgeBase:
 
     @staticmethod
     def _load_products(path: Path) -> List[Product]:
-        if path.suffix.lower() == ".csv":
-            raw_items = _read_csv(path)
-        else:
-            raw_items = _read_json(path)
+        if path.suffix.lower() != ".json":
+            raise ValueError(
+                f"Unsupported product file format '{path.suffix}'. Only JSON is supported."
+            )
+        raw_items = _read_json(path)
         products = [
             Product(
                 name=item.get("name") or item.get("Nama") or item.get("product_name", ""),
@@ -447,10 +439,22 @@ def launch_gradio_chat(
         "Meluncurkan antarmuka Gradio di %s:%s (share=%s)", server_name, server_port, share
     )
 
-    def _respond(message: str, history: list[tuple[str, str]]):  # type: ignore[override]
-        if not message.strip():
-            return "Silakan masukkan pertanyaan yang ingin Anda tanyakan."
-        return agent.answer(message)
+    def _respond(message, history):  # type: ignore[override]
+        """Handle incoming chat messages from Gradio."""
+
+        if isinstance(message, dict):
+            content = message.get("content", "")
+        else:
+            content = str(message) if message is not None else ""
+
+        if not content.strip():
+            return {
+                "role": "assistant",
+                "content": "Silakan masukkan pertanyaan yang ingin Anda tanyakan.",
+            }
+
+        answer = agent.answer(content)
+        return {"role": "assistant", "content": answer}
 
     description = textwrap.dedent(
         """
@@ -463,6 +467,7 @@ def launch_gradio_chat(
         fn=_respond,
         title="Agen Layanan Pelanggan (Bahasa Indonesia)",
         description=description,
+        type="messages",
     )
 
     chat.launch(server_name=server_name, server_port=server_port, share=share)
@@ -473,7 +478,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--catalog",
         type=Path,
-        help="Path ke katalog produk (CSV atau JSON).",
+        help="Path ke katalog produk (JSON).",
     )
     parser.add_argument(
         "--faq",
