@@ -715,8 +715,6 @@ class CustomerServiceAgent:
 
 class AgenticPurchaseWorkflow:
 
-    """Structured checkout workflow orchestrated by the agent."""
-
     JSON_KEYS = {
         "cart": ("cart", "items", "produk", "keranjang"),
         "shipping": ("shipping", "pengiriman", "delivery"),
@@ -1018,8 +1016,7 @@ def launch_gradio_app(
 
     description = textwrap.dedent(
         """
-        Ajukan pertanyaan layanan pelanggan dalam Bahasa Indonesia.
-        Sistem akan menggunakan basis pengetahuan internal untuk membantu menjawab.
+        Silahkan ajukan pertanyaan tentang produk yang lagi dicari dan yang relevan dalam Bahasa Indonesia.
         """
     ).strip()
 
@@ -1034,7 +1031,7 @@ def launch_gradio_app(
 
     chat = gr.ChatInterface(
         fn=_respond,
-        title="Agen Layanan Pelanggan (Bahasa Indonesia)",
+        title="E-commerce Customer Service Agent (Bahasa Indonesia)",
         description=description,
         type="messages",
     )
@@ -1160,26 +1157,6 @@ def launch_gradio_app(
             share=share,
             ssr_mode=ssr_mode,
         )
-
-
-"""def _default_gradio_server() -> tuple[str, int]:
-
-    server_name = os.environ.get("GRADIO_SERVER_NAME") or os.environ.get("HOST")
-    if not server_name:
-        server_name = "0.0.0.0"
-
-    port_env = os.environ.get("PORT")
-    if port_env:
-        try:
-            server_port = int(port_env)
-        except ValueError:
-            LOGGER.warning("Nilai PORT tidak valid: %s; menggunakan 7860", port_env)
-            server_port = 7860
-    else:
-        server_port = 7860
-
-    return server_name, server_port"""
-
 
 def _default_gradio_server() -> tuple[str, int]:
         """Return default Gradio server host and port, respecting env overrides."""
