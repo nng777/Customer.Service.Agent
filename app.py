@@ -6,30 +6,19 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
 
 import difflib
 import logging
+import requests
 
-try:  # ``requests`` is a very common dependency, but we guard the import.
-    import requests
-except ModuleNotFoundError as exc:  # pragma: no cover - only executed w/out dependency
-    raise RuntimeError(
-        "The 'requests' package is required to run this script. Install it with "
-        "'pip install requests'."
-    ) from exc
 
 
 LOGGER = logging.getLogger(__name__)
 
 
 def _read_text(path: Path) -> str:
-    """Read a text file using UTF-8 encoding.
-
-    Parameters
-    ----------
-    path:
-        Location of the file to read.
-    """
 
     LOGGER.debug("Reading text file: %s", path)
     return path.read_text(encoding="utf-8")
@@ -42,7 +31,7 @@ def _read_json(path: Path) -> Any:
 
 @dataclass
 class Product:
-    """Representation of a product in the mock catalogue."""
+
 
     name: str
     description: str
@@ -52,7 +41,7 @@ class Product:
 
     @property
     def context(self) -> str:
-        """Formatted text that can be passed to the language model."""
+
 
         price = f"Harga: {self.price}" if self.price else ""
         sku = f"SKU: {self.sku}" if self.sku else ""
@@ -94,12 +83,6 @@ class KnowledgeBase:
         catalog_path: Optional[Path] = None,
         faq_path: Optional[Path] = None,
     ) -> "KnowledgeBase":
-        """Load knowledge base content from files.
-
-        ``catalog_path`` must be a JSON file containing product objects.  ``faq_path`` may be either a
-        JSON file containing ``{"question": ..., "answer": ...}`` dictionaries or a
-        Markdown file using heading/question pairs.
-        """
 
         products = cls._load_products(catalog_path) if catalog_path else []
         faqs = cls._load_faqs(faq_path) if faq_path else []
@@ -224,7 +207,6 @@ class KnowledgeBase:
         return products, faqs
 
     def search(self, query: str, *, limit: int = 3) -> List[str]:
-        """Retrieve relevant snippets for the provided query."""
 
         candidates: List[str] = []
 
@@ -256,7 +238,6 @@ class KnowledgeBase:
 
 
 class RAGRetriever:
-    """Simple context retriever that builds prompts for the agent."""
 
     def __init__(self, knowledge_base: KnowledgeBase, *, top_k: int = 3) -> None:
         self.knowledge_base = knowledge_base
@@ -269,7 +250,6 @@ class RAGRetriever:
 
 
 class GeminiChatModel:
-    """Minimal HTTP client for the Gemini API."""
 
     DEFAULT_MODEL = "gemini-2.0-flash"
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -328,7 +308,6 @@ class GeminiChatModel:
 
 
 class CustomerServiceAgent:
-    """High-level orchestration of the retrieval augmented chatbot."""
 
     def __init__(
         self,
@@ -440,7 +419,6 @@ def launch_gradio_chat(
     )
 
     def _respond(message, history):  # type: ignore[override]
-        """Handle incoming chat messages from Gradio."""
 
         if isinstance(message, dict):
             content = message.get("content", "")
@@ -590,5 +568,5 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - manual execution
+if __name__ == "__main__":
     raise SystemExit(main())
