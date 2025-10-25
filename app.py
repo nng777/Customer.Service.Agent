@@ -33,29 +33,34 @@ class Product:
 
     name: str
     description: str
-    price: Optional[str] = None
-    sku: Optional[str] = None
-    url: Optional[str] = None
+    id: Optional[str] = None
     brand: Optional[str] = None
     category: Optional[str] = None
     variant: Optional[str] = None
+    price_idr: Optional[str] = None
+    currency: Optional[str] = None
     marketplace: Optional[str] = None
     store_name: Optional[str] = None
     store_type: Optional[str] = None
     store_url: Optional[str] = None
+    product_url: Optional[str] = None
     stock_status: Optional[str] = None
     last_updated: Optional[str] = None
+
 
     @property
     def context(self) -> str:
 
         lines = [f"Nama Produk: {self.name}"]
 
+        if self.id:
+            lines.append(f"ID: {self.id}")
+
         metadata_fields: tuple[tuple[str, Optional[str]], ...] = (
             ("Brand", self.brand),
             ("Kategori", self.category),
             ("Varian", self.variant),
-            ("Harga", self.price),
+            ("Harga", self._format_price_display()),
             ("Marketplace", self.marketplace),
             ("Nama Toko", self.store_name),
             ("Tipe Toko", self.store_type),
@@ -67,13 +72,10 @@ class Product:
             if value:
                 lines.append(f"{label}: {value}")
 
-        if self.sku:
-            lines.append(f"ID/SKU: {self.sku}")
-
         lines.append(f"Deskripsi: {self.description}")
 
-        if self.url:
-            lines.append(f"URL Produk: {self.url}")
+        if self.product_url:
+            lines.append(f"URL Produk: {self.product_url}")
         if self.store_url:
             lines.append(f"URL Toko: {self.store_url}")
 
@@ -83,18 +85,40 @@ class Product:
     def search_blob(self) -> str:
         parts = [
             self.name,
+            self.id,
             self.brand,
             self.category,
             self.variant,
-            self.sku,
             self.marketplace,
             self.store_name,
             self.store_type,
+            self.store_url,
+            self.product_url,
+            self.stock_status,
+            self.description,
         ]
         return " | ".join(str(part) for part in parts if part)
 
+    def _format_price_display(self) -> Optional[str]:
+        if not self.price_idr:
+            return None
 
+        raw = str(self.price_idr).strip()
+        digits_only = "".join(ch for ch in raw if ch.isdigit())
 
+        numeric_value: Optional[float]
+        if digits_only and len(digits_only) >= 3:
+            numeric_value = float(digits_only)
+        else:
+            numeric_value = None
+
+        formatted = (
+            f"{numeric_value:,.0f}".replace(",", ".") if numeric_value is not None else raw
+        )
+
+        if self.currency:
+            return f"{self.currency} {formatted}".strip()
+        return formatted
 
 @dataclass
 class FAQ:
@@ -387,25 +411,29 @@ class KnowledgeBase:
         )
         description = str(description_raw).strip() if description_raw else "Tidak ada deskripsi."
 
-        price = KnowledgeBase._format_price(item)
-        sku = item.get("sku") or item.get("SKU") or item.get("id")
-        url = item.get("product_url") or item.get("url") or item.get("URL")
+        product_id = KnowledgeBase._sanitize_text(
+            item.get("id") or item.get("ID") or item.get("sku") or item.get("SKU")
+        )
+
+        price_idr = KnowledgeBase._normalize_price_idr(item.get("price_idr"))
+        currency = KnowledgeBase._sanitize_text(item.get("currency") or item.get("currency_code"))
 
         return Product(
             name=name,
             description=description,
-            price=price,
-            sku=sku,
-            url=url,
-            brand=item.get("brand"),
-            category=item.get("category"),
-            variant=item.get("variant"),
-            marketplace=item.get("marketplace"),
-            store_name=item.get("store_name"),
-            store_type=item.get("store_type"),
-            store_url=item.get("store_url"),
-            stock_status=item.get("stock_status"),
-            last_updated=item.get("last_updated"),
+            id=product_id,
+            brand=KnowledgeBase._sanitize_text(item.get("brand")),
+            category=KnowledgeBase._sanitize_text(item.get("category")),
+            variant=KnowledgeBase._sanitize_text(item.get("variant")),
+            price_idr=price_idr,
+            currency=currency,
+            marketplace=KnowledgeBase._sanitize_text(item.get("marketplace")),
+            store_name=KnowledgeBase._sanitize_text(item.get("store_name")),
+            store_type=KnowledgeBase._sanitize_text(item.get("store_type")),
+            store_url=KnowledgeBase._sanitize_text(item.get("store_url")),
+            product_url=KnowledgeBase._sanitize_text(item.get("product_url") or item.get("url") or item.get("URL")),
+            stock_status=KnowledgeBase._sanitize_text(item.get("stock_status")),
+            last_updated=KnowledgeBase._sanitize_text(item.get("last_updated")),
         )
 
     @staticmethod
@@ -421,24 +449,29 @@ class KnowledgeBase:
 
         return FAQ(question=str(question or "").strip(), answer=str(answer or "").strip())
 
+    def _sanitize_text(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
     @staticmethod
-    def _format_price(item: Dict[str, Any]) -> Optional[str]:
-        direct_price = (
-            item.get("price") or item.get("Harga") or item.get("product_price")
+    def _normalize_price_idr(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return str(int(value))
+        text = str(value).strip()
+        if not text:
+            return None
+        normalized = (
+            text.replace("IDR", "")
+            .replace("idr", "")
+            .replace("Rp", "")
+            .replace("rp", "")
+            .strip()
         )
-        if direct_price:
-            return str(direct_price)
-
-        price_idr = item.get("price_idr")
-        if price_idr is not None:
-            if isinstance(price_idr, (int, float)):
-                formatted = f"{price_idr:,.0f}".replace(",", ".")
-            else:
-                formatted = str(price_idr)
-            currency = item.get("currency") or item.get("currency_code")
-            return f"{currency} {formatted}".strip() if currency else formatted
-
-        return None
+        return normalized or None
 
 
 class RAGRetriever:
@@ -619,6 +652,14 @@ class AgenticPurchaseWorkflow:
             untuk menyelesaikan proses checkout secara terstruktur. Susun rencana
             pembelian yang mencakup produk yang relevan, ringkasan keranjang, informasi
             pengiriman, pilihan pembayaran, dan langkah tindak lanjut.
+            
+            Data produk dalam konteks menyediakan kolom id, name, brand, category,
+            variant, price_idr, currency, marketplace, store_name, store_type,
+            store_url, product_url, description, stock_status, dan last_updated.
+            Gunakan kolom-kolom tersebut untuk memilih produk yang tepat dan cantumkan
+            detail penting seperti harga, status stok, tautan produk, dan informasi
+            toko ketika relevan.
+
 
             Berikan jawaban dalam JSON valid dengan format berikut:
             {
