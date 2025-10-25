@@ -36,19 +36,64 @@ class Product:
     price: Optional[str] = None
     sku: Optional[str] = None
     url: Optional[str] = None
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    variant: Optional[str] = None
+    marketplace: Optional[str] = None
+    store_name: Optional[str] = None
+    store_type: Optional[str] = None
+    store_url: Optional[str] = None
+    stock_status: Optional[str] = None
+    last_updated: Optional[str] = None
 
     @property
     def context(self) -> str:
 
+        lines = [f"Nama Produk: {self.name}"]
 
-        price = f"Harga: {self.price}" if self.price else ""
-        sku = f"SKU: {self.sku}" if self.sku else ""
-        url = f"URL: {self.url}" if self.url else ""
-        lines = [f"Nama Produk: {self.name}", f"Deskripsi: {self.description}"]
-        for metadata in (price, sku, url):
-            if metadata:
-                lines.append(metadata)
+        metadata_fields: tuple[tuple[str, Optional[str]], ...] = (
+            ("Brand", self.brand),
+            ("Kategori", self.category),
+            ("Varian", self.variant),
+            ("Harga", self.price),
+            ("Marketplace", self.marketplace),
+            ("Nama Toko", self.store_name),
+            ("Tipe Toko", self.store_type),
+            ("Status Stok", self.stock_status),
+            ("Terakhir diperbarui", self.last_updated),
+        )
+
+        for label, value in metadata_fields:
+            if value:
+                lines.append(f"{label}: {value}")
+
+        if self.sku:
+            lines.append(f"ID/SKU: {self.sku}")
+
+        lines.append(f"Deskripsi: {self.description}")
+
+        if self.url:
+            lines.append(f"URL Produk: {self.url}")
+        if self.store_url:
+            lines.append(f"URL Toko: {self.store_url}")
+
         return "\n".join(lines)
+
+    @property
+    def search_blob(self) -> str:
+        parts = [
+            self.name,
+            self.brand,
+            self.category,
+            self.variant,
+            self.sku,
+            self.marketplace,
+            self.store_name,
+            self.store_type,
+        ]
+        return " | ".join(str(part) for part in parts if part)
+
+
 
 
 @dataclass
@@ -236,18 +281,36 @@ class KnowledgeBase:
 
         candidates: List[str] = []
 
-        product_names = [product.name for product in self.products]
+        product_entries = [
+            (product, product.search_blob or product.name) for product in self.products
+        ]
+
         faq_questions = [faq.question for faq in self.faqs]
 
-        product_matches = difflib.get_close_matches(query, product_names, n=limit, cutoff=0.1)
+        product_corpus = [entry[1] for entry in product_entries]
+        product_matches = difflib.get_close_matches(query, product_corpus, n=limit, cutoff=0.1)
         faq_matches = difflib.get_close_matches(query, faq_questions, n=limit, cutoff=0.1)
 
         LOGGER.debug("Product matches: %s", product_matches)
         LOGGER.debug("FAQ matches: %s", faq_matches)
 
-        for product in self.products:
-            if product.name in product_matches:
+        seen_product_ids: set[int] = set()
+        for match in product_matches:
+            for product, corpus_text in product_entries:
+                if corpus_text == match and id(product) not in seen_product_ids:
+                    candidates.append(product.context)
+                    seen_product_ids.add(id(product))
+                    break
+
+        lower_query = query.lower()
+        for product, corpus_text in product_entries:
+            if len(candidates) >= limit:
+                break
+            if id(product) in seen_product_ids:
+                continue
+            if lower_query in corpus_text.lower():
                 candidates.append(product.context)
+                seen_product_ids.add(id(product))
 
         for faq in self.faqs:
             if faq.question in faq_matches:
@@ -255,9 +318,12 @@ class KnowledgeBase:
 
         if not candidates:
             LOGGER.debug("No fuzzy matches found. Falling back to first items.")
-            for product in self.products[:limit]:
-                candidates.append(product.context)
-            for faq in self.faqs[: limit - len(candidates)]:
+            for product, _ in product_entries[:limit]:
+                if id(product) not in seen_product_ids:
+                    candidates.append(product.context)
+                    seen_product_ids.add(id(product))
+            remaining = limit - len(candidates)
+            for faq in self.faqs[:remaining]:
                 candidates.append(faq.context)
 
         return candidates[:limit]
@@ -314,42 +380,33 @@ class KnowledgeBase:
         if not name:
             return None
 
-        description_parts: List[str] = []
         description_raw = (
             item.get("description")
             or item.get("Deskripsi")
             or item.get("product_description")
         )
-        if description_raw:
-            description_parts.append(str(description_raw).strip())
-
-        metadata_fields = (
-            ("Brand", "brand"),
-            ("Kategori", "category"),
-            ("Varian", "variant"),
-            ("Marketplace", "marketplace"),
-            ("Nama Toko", "store_name"),
-            ("Tipe Toko", "store_type"),
-            ("Status Stok", "stock_status"),
-            ("Terakhir diperbarui", "last_updated"),
-        )
-
-        for label, key in metadata_fields:
-            value = item.get(key)
-            if value:
-                description_parts.append(f"{label}: {value}")
-
-        store_url = item.get("store_url")
-        if store_url:
-            description_parts.append(f"URL Toko: {store_url}")
-
-        description = "\n".join(description_parts).strip() or "Tidak ada deskripsi."
+        description = str(description_raw).strip() if description_raw else "Tidak ada deskripsi."
 
         price = KnowledgeBase._format_price(item)
         sku = item.get("sku") or item.get("SKU") or item.get("id")
         url = item.get("product_url") or item.get("url") or item.get("URL")
 
-        return Product(name=name, description=description, price=price, sku=sku, url=url)
+        return Product(
+            name=name,
+            description=description,
+            price=price,
+            sku=sku,
+            url=url,
+            brand=item.get("brand"),
+            category=item.get("category"),
+            variant=item.get("variant"),
+            marketplace=item.get("marketplace"),
+            store_name=item.get("store_name"),
+            store_type=item.get("store_type"),
+            store_url=item.get("store_url"),
+            stock_status=item.get("stock_status"),
+            last_updated=item.get("last_updated"),
+        )
 
     @staticmethod
     def _build_faq(item: Any) -> Optional[FAQ]:
@@ -473,6 +530,12 @@ class CustomerServiceAgent:
             Kamu adalah agen layanan pelanggan untuk toko e-commerce di Indonesia.
             Jawablah selalu dalam Bahasa Indonesia dengan nada {self.tone.lower()}.
             Gunakan informasi pada bagian KONTEKS untuk memberikan jawaban yang akurat.
+            Data produk memiliki kolom: id, name, brand, category, variant, price_idr,
+            currency, marketplace, store_name, store_type, store_url, product_url,
+            description, stock_status, dan last_updated.
+            Saat menanggapi pelanggan, manfaatkan kolom-kolom tersebut untuk mencari
+            produk yang relevan dan sebutkan detail penting seperti harga, brand,
+            kategori, status stok, serta tautan toko/produk jika tersedia.
             Jika informasinya tidak ada, cari ulang terlebih dahulu berdasarkan nama produk atau kategori, dan bila masih tidak dapat ditemukan, jelaskan secara jujur dan tawarkan bantuan lanjutan.
             """
         ).strip()
