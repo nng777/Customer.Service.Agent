@@ -739,6 +739,15 @@ def launch_gradio_app(
         """
     ).strip()
 
+    checkout_description = textwrap.dedent(
+        """
+        Masukkan permintaan pembelian Anda untuk mendapatkan ringkasan checkout
+        terstruktur, termasuk produk yang dipilih, informasi pengiriman,
+        metode pembayaran, dan langkah berikutnya.
+        """
+    ).strip()
+
+
     chat = gr.ChatInterface(
         fn=_respond,
         title="Agen Layanan Pelanggan (Bahasa Indonesia)",
@@ -746,29 +755,120 @@ def launch_gradio_app(
         type="messages",
     )
 
-    checkout_interface = gr.Interface(
-        fn=_plan_checkout,
-        inputs=gr.Textbox(
-            label="Kebutuhan Pembelian",
-            placeholder="Contoh: Saya ingin membeli payung otomatis.",
-            lines=4,
-        ),
-        outputs=gr.Textbox(label="Rencana Checkout", lines=15),
-        title="Rencana Checkout",
-        description=textwrap.dedent(
-            """
-            Masukkan permintaan pembelian Anda untuk mendapatkan ringkasan checkout
-            terstruktur, termasuk produk yang dipilih, informasi pengiriman,
-            metode pembayaran, dan langkah berikutnya.
-            """
-        ).strip(),
-    )
+    with gr.Blocks(title="Agen Layanan Pelanggan") as demo:
+        with gr.Tab("Percakapan"):
+            chat.render()
 
-    gr.TabbedInterface(
-        [chat, checkout_interface],
-        ["Percakapan", "Checkout"],
-        title="Agen Layanan Pelanggan",
-    ).launch(server_name=server_name, server_port=server_port, share=share)
+        with gr.Tab("Checkout"):
+            gr.Markdown(f"### Rencana Checkout\n{checkout_description}")
+            purchase_request = gr.Textbox(
+                label="Kebutuhan Pembelian",
+                placeholder="Contoh: Saya ingin membeli payung otomatis.",
+                lines=4,
+            )
+            plan_output = gr.Textbox(
+                label="Rencana Checkout", lines=15, elem_id="checkout-plan-output"
+            )
+            gr.HTML(
+                textwrap.dedent(
+                    """
+                    <style>
+                      #checkout-plan-printable {
+                        display: none;
+                        font-family: "Segoe UI", system-ui, sans-serif;
+                        font-size: 14px;
+                        line-height: 1.5;
+                        margin: 40px;
+                      }
+                      #checkout-plan-printable h1 {
+                        font-size: 20px;
+                        text-align: center;
+                        margin-bottom: 24px;
+                      }
+                      #checkout-plan-printable pre {
+                        white-space: pre-wrap;
+                        word-break: break-word;
+                        margin: 0;
+                      }
+                      @media print {
+                        body {
+                          margin: 0;
+                        }
+                        body * {
+                          visibility: hidden;
+                        }
+                        #checkout-plan-printable,
+                        #checkout-plan-printable * {
+                          visibility: visible;
+                        }
+                        #checkout-plan-printable {
+                          position: fixed;
+                          inset: 0;
+                          display: block !important;
+                          padding: 40px;
+                        }
+                      }
+                    </style>
+                    <div id="checkout-plan-printable" role="presentation">
+                      <h1>Rencana Checkout</h1>
+                      <pre></pre>
+                    </div>
+                    """
+                )
+            )
+            with gr.Row():
+                submit_btn = gr.Button("Buat Rencana", variant="primary")
+                print_btn = gr.Button("Print")
+
+            print_btn.click(
+                None,
+                [],
+                [],
+                js=textwrap.dedent(
+                    """
+                    () => {
+                        const textarea = document.querySelector(
+                            '#checkout-plan-output textarea'
+                        );
+                        const plan = textarea ? textarea.value : '';
+
+                        if (!plan.trim()) {
+                            window.alert('Rencana checkout masih kosong.');
+                            return [];
+                        }
+
+                        const printable = document.getElementById('checkout-plan-printable');
+                        const pre = printable ? printable.querySelector('pre') : null;
+
+                        if (!printable || !pre) {
+                            window.alert('Gagal menyiapkan tampilan cetak.');
+                            return [];
+                        }
+
+                        const previousDisplay = printable.style.display;
+                        pre.textContent = plan;
+                        printable.style.display = 'block';
+
+                        const cleanup = () => {
+                            printable.style.display = previousDisplay || 'none';
+                            window.removeEventListener('afterprint', cleanup);
+                        };
+
+                        window.addEventListener('afterprint', cleanup);
+                        window.print();
+
+                        // Safari fallback: ensure cleanup even if afterprint doesn't fire.
+                        setTimeout(cleanup, 1000);
+                        return [];
+                    }
+                    """
+                ),
+            )
+
+            submit_btn.click(_plan_checkout, purchase_request, plan_output)
+            purchase_request.submit(_plan_checkout, purchase_request, plan_output)
+
+    demo.launch(server_name=server_name, server_port=server_port, share=share)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
