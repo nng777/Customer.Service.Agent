@@ -5,9 +5,7 @@ import textwrap
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-
 
 import difflib
 import logging
@@ -64,6 +62,73 @@ class FAQ:
     def context(self) -> str:
         return f"Pertanyaan: {self.question}\nJawaban: {self.answer}"
 
+
+
+@dataclass
+class CartItem:
+
+
+    name: str
+    quantity: int = 1
+    reason: Optional[str] = None
+    price_hint: Optional[str] = None
+
+    def format_line(self) -> str:
+        parts = [f"- {self.name}"]
+        if self.quantity != 1:
+            parts.append(f"(jumlah: {self.quantity})")
+        if self.price_hint:
+            parts.append(f"perkiraan harga: {self.price_hint}")
+        if self.reason:
+            parts.append(f"alasan: {self.reason}")
+        return " ".join(parts)
+
+
+@dataclass
+class CheckoutPlan:
+
+
+    cart_items: List[CartItem]
+    shipping_address: str
+    contact: str
+    payment_method: str
+    next_steps: List[str]
+    upsell: Optional[str] = None
+    notes: Optional[str] = None
+
+    def format_summary(self) -> str:
+        lines: List[str] = [
+            "RINGKASAN RENCANA PEMBELIAN",
+            "===========================",
+            "Keranjang Belanja:",
+        ]
+
+        if self.cart_items:
+            lines.extend(item.format_line() for item in self.cart_items)
+        else:
+            lines.append("- Belum ada produk yang dipilih.")
+
+        lines.extend(
+            [
+                "",
+                "Informasi Checkout:",
+                f"Alamat pengiriman: {self.shipping_address or 'Belum ditentukan'}",
+                f"Kontak pelanggan: {self.contact or 'Belum ditentukan'}",
+                f"Metode pembayaran: {self.payment_method or 'Belum dipilih'}",
+            ]
+        )
+
+        if self.notes:
+            lines.append(f"Catatan tambahan: {self.notes}")
+        if self.upsell:
+            lines.append(f"Saran tambahan: {self.upsell}")
+
+        if self.next_steps:
+            lines.extend(["", "Langkah berikutnya:"])
+            for idx, step in enumerate(self.next_steps, start=1):
+                lines.append(f"{idx}. {step}")
+
+        return "\n".join(lines)
 
 class KnowledgeBase:
     """In-memory storage for the product catalogue and FAQ documents."""
@@ -367,6 +432,230 @@ class CustomerServiceAgent:
             return fallback
 
 
+    def plan_purchase(self, request: str) -> "CheckoutPlan":
+        workflow = AgenticPurchaseWorkflow(self)
+        return workflow.run(request)
+
+
+class AgenticPurchaseWorkflow:
+
+    """Structured checkout workflow orchestrated by the agent."""
+
+    JSON_KEYS = {
+        "cart": ("cart", "items", "produk", "keranjang"),
+        "shipping": ("shipping", "pengiriman", "delivery"),
+        "payment": ("payment", "pembayaran"),
+        "next_steps": ("next_steps", "steps", "langkah"),
+        "upsell": ("upsell", "cross_sell", "saran"),
+    }
+
+    def __init__(self, agent: CustomerServiceAgent) -> None:
+        self.agent = agent
+
+    def run(self, request: str) -> CheckoutPlan:
+        context = self.agent.retriever.build_context(request)
+        prompt = self._build_prompt(request, context)
+
+        try:
+            response = self.agent.model.generate(prompt)
+            plan = self._parse_plan(response)
+            if plan:
+                return plan
+            LOGGER.warning("Model response could not be parsed into checkout plan.")
+        except Exception as exc:  # pragma: no cover - depends on external API
+            LOGGER.error("Workflow generation failed: %s", exc)
+
+        return self._fallback_plan(request)
+
+    def _build_prompt(self, request: str, context: str) -> str:
+        instruction = textwrap.dedent(
+            """
+            Kamu adalah agen pembelian yang membantu pelanggan e-commerce di Indonesia
+            untuk menyelesaikan proses checkout secara terstruktur. Susun rencana
+            pembelian yang mencakup produk yang relevan, ringkasan keranjang, informasi
+            pengiriman, pilihan pembayaran, dan langkah tindak lanjut.
+
+            Berikan jawaban dalam JSON valid dengan format berikut:
+            {
+              "cart": [
+                {
+                  "product_name": "...",
+                  "quantity": 1,
+                  "reason": "...",
+                  "price_hint": "..."
+                }
+              ],
+              "shipping": {
+                "address": "...",
+                "contact": "...",
+                "notes": "..."
+              },
+              "payment": {
+                "method": "...",
+                "instructions": "..."
+              },
+              "next_steps": ["Langkah 1", "Langkah 2"],
+              "upsell": "Saran tambahan jika ada"
+            }
+
+            Jika informasi tertentu belum diketahui, isi dengan penjelasan singkat.
+            Hindari menambahkan teks lain di luar JSON.
+            """
+        ).strip()
+
+        prompt = textwrap.dedent(
+            f"""
+            {instruction}
+
+            KONTEKS PRODUK DAN FAQ:
+            {context}
+
+            PERMINTAAN PELANGGAN:
+            {request}
+            """
+        ).strip()
+
+        LOGGER.debug("Purchase workflow prompt length %d", len(prompt))
+        return prompt
+
+    def _parse_plan(self, raw_response: str) -> Optional[CheckoutPlan]:
+        cleaned = self._extract_json(raw_response)
+        if not cleaned:
+            return None
+
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError:
+            LOGGER.debug("Failed to decode JSON from workflow response: %s", raw_response)
+            return None
+
+        cart_entries = self._get_first_key(payload, "cart", default=[])
+        cart_items = self._parse_cart(cart_entries)
+
+        shipping_data = self._get_first_key(payload, "shipping", default={})
+        payment_data = self._get_first_key(payload, "payment", default={})
+        next_steps = self._get_first_key(payload, "next_steps", default=[])
+        upsell = self._get_first_key(payload, "upsell")
+
+        shipping_address = self._select_text(
+            shipping_data, ("address", "alamat", "detail", "destination")
+        )
+        contact = self._select_text(shipping_data, ("contact", "phone", "kontak", "email"))
+        notes = self._select_text(shipping_data, ("notes", "catatan"))
+
+        payment_method = self._select_text(
+            payment_data, ("method", "metode", "tipe", "channel")
+        )
+        payment_notes = self._select_text(
+            payment_data, ("instructions", "catatan", "notes", "detail")
+        )
+
+        steps_list = [str(step).strip() for step in (next_steps or []) if str(step).strip()]
+
+        return CheckoutPlan(
+            cart_items=cart_items,
+            shipping_address=shipping_address or "Perlu konfirmasi pelanggan.",
+            contact=contact or "Perlu data kontak pelanggan.",
+            payment_method=payment_method or "Perlu memilih metode pembayaran.",
+            next_steps=steps_list if steps_list else [
+                "Konfirmasi alamat dan kontak pelanggan.",
+                "Kirim tautan pembayaran kepada pelanggan.",
+            ],
+            upsell=str(upsell).strip() if upsell else None,
+            notes=notes or payment_notes,
+        )
+
+    def _extract_json(self, raw: str) -> Optional[str]:
+        if not raw:
+            return None
+
+        text = raw.strip()
+        if text.startswith("```"):
+            lines = [line for line in text.splitlines() if not line.startswith("```")]
+            text = "\n".join(lines).strip()
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        return text[start : end + 1]
+
+    def _get_first_key(self, payload: Dict[str, Any], key: str, default: Any = None) -> Any:
+        candidates = self.JSON_KEYS.get(key, (key,))
+        for candidate in candidates:
+            if isinstance(payload, dict) and candidate in payload:
+                return payload[candidate]
+        return default
+
+    def _parse_cart(self, entries: Any) -> List[CartItem]:
+        items: List[CartItem] = []
+        if not isinstance(entries, Iterable):
+            return items
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = self._select_text(
+                entry, ("product_name", "name", "nama", "title", "produk")
+            )
+            if not name:
+                continue
+            quantity_raw = entry.get("quantity") or entry.get("qty") or entry.get("jumlah")
+            try:
+                quantity = int(quantity_raw) if quantity_raw is not None else 1
+            except (TypeError, ValueError):
+                quantity = 1
+            reason = self._select_text(entry, ("reason", "alasan", "why"))
+            price_hint = self._select_text(entry, ("price_hint", "price", "harga"))
+            items.append(
+                CartItem(
+                    name=name,
+                    quantity=quantity if quantity > 0 else 1,
+                    reason=reason,
+                    price_hint=price_hint,
+                )
+            )
+
+        return items
+
+    def _select_text(self, payload: Any, keys: Tuple[str, ...]) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+        for key in keys:
+            if key in payload and payload[key]:
+                return str(payload[key]).strip()
+        return None
+
+    def _fallback_plan(self, request: str) -> CheckoutPlan:
+        product = self._match_product(request)
+        cart_items = [CartItem(name=product.name, reason="Produk paling relevan.")]
+
+        return CheckoutPlan(
+            cart_items=cart_items,
+            shipping_address="Perlu alamat pengiriman dari pelanggan.",
+            contact="Minta nomor telepon atau email pelanggan.",
+            payment_method="Pilih metode pembayaran yang disetujui pelanggan.",
+            next_steps=[
+                "Konfirmasi detail produk dan jumlah.",
+                "Kumpulkan alamat lengkap dan metode pembayaran.",
+                "Buat pesanan di sistem internal dan kirim konfirmasi.",
+            ],
+            upsell="Tawarkan aksesoris atau layanan terkait jika tersedia.",
+        )
+
+    def _match_product(self, request: str) -> Product:
+        products = self.agent.retriever.knowledge_base.products
+        if not products:
+            return Product(name="Produk tidak ditemukan", description="")
+
+        names = [product.name for product in products]
+        matches = difflib.get_close_matches(request, names, n=1, cutoff=0.3)
+        if matches:
+            for product in products:
+                if product.name == matches[0]:
+                    return product
+        return products[0]
+
 def configure_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="[%(levelname)s] %(message)s")
@@ -400,7 +689,7 @@ def interactive_chat(agent: CustomerServiceAgent) -> None:
         print(f"Agen: {answer}\n")
 
 
-def launch_gradio_chat(
+def launch_gradio_app(
     agent: CustomerServiceAgent,
     *,
     server_name: str,
@@ -434,6 +723,15 @@ def launch_gradio_chat(
         answer = agent.answer(content)
         return {"role": "assistant", "content": answer}
 
+
+    def _plan_checkout(purchase_request: str) -> str:
+        if not purchase_request.strip():
+            return "Silakan jelaskan kebutuhan pembelian Anda terlebih dahulu."
+
+        plan = agent.plan_purchase(purchase_request)
+        return plan.format_summary()
+
+
     description = textwrap.dedent(
         """
         Ajukan pertanyaan layanan pelanggan dalam Bahasa Indonesia.
@@ -448,7 +746,29 @@ def launch_gradio_chat(
         type="messages",
     )
 
-    chat.launch(server_name=server_name, server_port=server_port, share=share)
+    checkout_interface = gr.Interface(
+        fn=_plan_checkout,
+        inputs=gr.Textbox(
+            label="Kebutuhan Pembelian",
+            placeholder="Contoh: Saya ingin membeli payung otomatis.",
+            lines=4,
+        ),
+        outputs=gr.Textbox(label="Rencana Checkout", lines=15),
+        title="Rencana Checkout",
+        description=textwrap.dedent(
+            """
+            Masukkan permintaan pembelian Anda untuk mendapatkan ringkasan checkout
+            terstruktur, termasuk produk yang dipilih, informasi pengiriman,
+            metode pembayaran, dan langkah berikutnya.
+            """
+        ).strip(),
+    )
+
+    gr.TabbedInterface(
+        [chat, checkout_interface],
+        ["Percakapan", "Checkout"],
+        title="Agen Layanan Pelanggan",
+    ).launch(server_name=server_name, server_port=server_port, share=share)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -488,6 +808,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--question",
         help="Ajukan satu pertanyaan dan tampilkan jawabannya tanpa mode interaktif.",
+    )
+    parser.add_argument(
+        "--purchase",
+        help="Jalankan workflow pembelian terstruktur berdasarkan permintaan pelanggan.",
     )
     parser.add_argument(
         "--no-gradio",
@@ -547,13 +871,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 1
 
+    if args.purchase and args.question:
+        LOGGER.error("Gunakan hanya salah satu dari --question atau --purchase dalam satu waktu.")
+        return 1
+
+
     if args.question:
         print(agent.answer(args.question))
         return 0
 
+    if args.purchase:
+        plan = agent.plan_purchase(args.purchase)
+        print(plan.format_summary())
+        return 0
+
+
     if args.gradio:
         try:
-            launch_gradio_chat(
+            launch_gradio_app(
                 agent,
                 server_name=args.server_name,
                 server_port=args.server_port,
