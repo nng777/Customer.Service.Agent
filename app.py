@@ -632,7 +632,7 @@ class GeminiChatModel:
             parts = first_candidate["content"]["parts"]
             text_parts = [part["text"] for part in parts if "text" in part]
             answer = "\n".join(text_parts).strip()
-        except (KeyError, IndexError, TypeError) as exc:  # pragma: no cover - depends on API
+        except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(
                 "Unexpected response structure from Gemini API: "
                 f"{json.dumps(body, ensure_ascii=False)[:200]}"
@@ -693,7 +693,7 @@ class CustomerServiceAgent:
         prompt = self.build_prompt(query, context)
         try:
             return self.model.generate(prompt)
-        except Exception as exc:  # pragma: no cover - depends on external API
+        except Exception as exc:
             LOGGER.error("Gemini request failed: %s", exc)
             fallback = textwrap.dedent(
                 f"""
@@ -738,7 +738,7 @@ class AgenticPurchaseWorkflow:
             if plan:
                 return plan
             LOGGER.warning("Model response could not be parsed into checkout plan.")
-        except Exception as exc:  # pragma: no cover - depends on external API
+        except Exception as exc:
             LOGGER.error("Workflow generation failed: %s", exc)
 
         return self._fallback_plan(request)
@@ -978,10 +978,11 @@ def launch_gradio_app(
     server_name: str,
     server_port: int,
     share: bool,
+    ssr_mode: bool,
 ) -> None:
     try:
         import gradio as gr
-    except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+    except ModuleNotFoundError as exc:
         raise RuntimeError(
             "Gradio belum terpasang. Jalankan 'pip install gradio' untuk menggunakan --gradio."
         ) from exc
@@ -990,7 +991,7 @@ def launch_gradio_app(
         "Meluncurkan antarmuka Gradio di %s:%s (share=%s)", server_name, server_port, share
     )
 
-    def _respond(message, history):  # type: ignore[override]
+    def _respond(message, history):
 
         if isinstance(message, dict):
             content = message.get("content", "")
@@ -1153,7 +1154,51 @@ def launch_gradio_app(
             submit_btn.click(_plan_checkout, purchase_request, plan_output)
             purchase_request.submit(_plan_checkout, purchase_request, plan_output)
 
-    demo.launch(server_name=server_name, server_port=server_port, share=share)
+        demo.launch(
+            server_name=server_name,
+            server_port=server_port,
+            share=share,
+            ssr_mode=ssr_mode,
+        )
+
+
+"""def _default_gradio_server() -> tuple[str, int]:
+
+    server_name = os.environ.get("GRADIO_SERVER_NAME") or os.environ.get("HOST")
+    if not server_name:
+        server_name = "0.0.0.0"
+
+    port_env = os.environ.get("PORT")
+    if port_env:
+        try:
+            server_port = int(port_env)
+        except ValueError:
+            LOGGER.warning("Nilai PORT tidak valid: %s; menggunakan 7860", port_env)
+            server_port = 7860
+    else:
+        server_port = 7860
+
+    return server_name, server_port"""
+
+
+def _default_gradio_server() -> tuple[str, int]:
+        """Return default Gradio server host and port, respecting env overrides."""
+
+        server_name = os.environ.get("GRADIO_SERVER_NAME") or os.environ.get("HOST")
+        if not server_name:
+            server_name = "0.0.0.0"
+
+        port_env = os.environ.get("PORT")
+        if port_env:
+            try:
+                server_port = int(port_env)
+            except ValueError:
+                LOGGER.warning("Nilai PORT tidak valid: %s; menggunakan 7860", port_env)
+                server_port = 7860
+        else:
+            server_port = 7860
+
+        return server_name, server_port
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -1204,16 +1249,29 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_false",
         help="Gunakan antarmuka CLI teks sebagai ganti Gradio.",
     )
+    default_server_name, default_server_port = _default_gradio_server()
     parser.add_argument(
         "--server-name",
-        default="127.0.0.1",
-        help="Nama host untuk server Gradio (default: 127.0.0.1).",
+        default=default_server_name,
+        help=(
+            "Nama host untuk server Gradio (default: 0.0.0.0 atau variabel GRADIO_SERVER_NAME/HOST)."
+        ),
     )
     parser.add_argument(
         "--server-port",
         type=int,
-        default=7860,
-        help="Port untuk server Gradio (default: 7860).",
+        default=default_server_port,
+        help=(
+            "Port untuk server Gradio (default: 7860 atau variabel PORT)."
+        ),
+    )
+    parser.add_argument(
+        "--ssr-mode",
+        dest="ssr_mode",
+        action="store_true",
+        help=(
+            "Aktifkan server-side rendering untuk Gradio (default: dinonaktifkan demi kompatibilitas HuggingFace)."
+        ),
     )
     parser.add_argument(
         "--share",
@@ -1277,6 +1335,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 agent,
                 server_name=args.server_name,
                 server_port=args.server_port,
+                ssr_mode=args.ssr_mode,
                 share=args.share,
             )
         except Exception as exc:
