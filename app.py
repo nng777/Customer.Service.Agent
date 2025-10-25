@@ -949,7 +949,7 @@ def launch_gradio_app(
             gr.Markdown(f"### Rencana Checkout\n{checkout_description}")
             purchase_request = gr.Textbox(
                 label="Kebutuhan Pembelian",
-                placeholder="Contoh: Saya ingin membeli payung otomatis.",
+                placeholder="Contoh: Saya ingin membeli smartphone.",
                 lines=4,
             )
             plan_output = gr.Textbox(
