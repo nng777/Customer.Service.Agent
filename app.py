@@ -166,20 +166,9 @@ class KnowledgeBase:
             raise ValueError(
                 f"Unsupported product file format '{path.suffix}'. Only JSON is supported."
             )
-        raw_items = _read_json(path)
-        products = [
-            Product(
-                name=item.get("name") or item.get("Nama") or item.get("product_name", ""),
-                description=item.get("description")
-                or item.get("Deskripsi")
-                or item.get("product_description", ""),
-                price=item.get("price") or item.get("Harga") or item.get("product_price"),
-                sku=item.get("sku") or item.get("SKU"),
-                url=item.get("url") or item.get("URL"),
-            )
-            for item in raw_items
-            if item
-        ]
+        raw_payload = _read_json(path)
+        products = KnowledgeBase._parse_products_payload(raw_payload)
+
         LOGGER.info("Loaded %d products from %s", len(products), path)
         return products
 
@@ -189,12 +178,9 @@ class KnowledgeBase:
             content = _read_text(path)
             return KnowledgeBase._parse_markdown_faq(content)
 
-        raw_items = _read_json(path)
-        faqs = [
-            FAQ(question=item.get("question", ""), answer=item.get("answer", ""))
-            for item in raw_items
-            if item
-        ]
+        raw_payload = _read_json(path)
+        faqs = KnowledgeBase._parse_faqs_payload(raw_payload)
+
         LOGGER.info("Loaded %d FAQ entries from %s", len(faqs), path)
         return faqs
 
@@ -234,33 +220,8 @@ class KnowledgeBase:
             LOGGER.error("Failed to parse sample data JSON %s: %s", sample_path, exc)
             return [], []
 
-        if not isinstance(payload, dict):
-            LOGGER.error("Sample data file %s does not contain an object.", sample_path)
-            return [], []
-
-        raw_products = payload.get("products", [])
-        raw_faqs = payload.get("faqs", [])
-
-        products = [
-            Product(
-                name=item.get("name", ""),
-                description=item.get("description", ""),
-                price=item.get("price"),
-                sku=item.get("sku"),
-                url=item.get("url"),
-            )
-            for item in raw_products
-            if isinstance(item, dict)
-        ]
-
-        faqs = [
-            FAQ(
-                question=item.get("question", ""),
-                answer=item.get("answer", ""),
-            )
-            for item in raw_faqs
-            if isinstance(item, dict)
-        ]
+        products = KnowledgeBase._parse_products_payload(payload)
+        faqs = KnowledgeBase._parse_faqs_payload(payload)
 
         LOGGER.info(
             "Loaded %d sample products and %d FAQ entries from %s",
@@ -300,6 +261,127 @@ class KnowledgeBase:
                 candidates.append(faq.context)
 
         return candidates[:limit]
+
+    @staticmethod
+    def _parse_products_payload(payload: Any) -> List[Product]:
+        if isinstance(payload, list):
+            raw_items = payload
+        elif isinstance(payload, dict):
+            raw_items = payload.get("products", [])
+        else:
+            LOGGER.error(
+                "Unsupported product payload type: %s", type(payload).__name__
+            )
+            return []
+
+        products: List[Product] = []
+        for item in raw_items:
+            product = KnowledgeBase._build_product(item)
+            if product:
+                products.append(product)
+        return products
+
+    @staticmethod
+    def _parse_faqs_payload(payload: Any) -> List[FAQ]:
+        if isinstance(payload, list):
+            raw_items = payload
+        elif isinstance(payload, dict):
+            raw_items = payload.get("faqs", [])
+        else:
+            LOGGER.error(
+                "Unsupported FAQ payload type: %s", type(payload).__name__
+            )
+            return []
+
+        faqs: List[FAQ] = []
+        for item in raw_items:
+            faq = KnowledgeBase._build_faq(item)
+            if faq:
+                faqs.append(faq)
+        return faqs
+
+    @staticmethod
+    def _build_product(item: Any) -> Optional[Product]:
+        if not isinstance(item, dict):
+            return None
+
+        name = (
+            item.get("name")
+            or item.get("Nama")
+            or item.get("product_name")
+            or ""
+        )
+        if not name:
+            return None
+
+        description_parts: List[str] = []
+        description_raw = (
+            item.get("description")
+            or item.get("Deskripsi")
+            or item.get("product_description")
+        )
+        if description_raw:
+            description_parts.append(str(description_raw).strip())
+
+        metadata_fields = (
+            ("Brand", "brand"),
+            ("Kategori", "category"),
+            ("Varian", "variant"),
+            ("Marketplace", "marketplace"),
+            ("Nama Toko", "store_name"),
+            ("Tipe Toko", "store_type"),
+            ("Status Stok", "stock_status"),
+            ("Terakhir diperbarui", "last_updated"),
+        )
+
+        for label, key in metadata_fields:
+            value = item.get(key)
+            if value:
+                description_parts.append(f"{label}: {value}")
+
+        store_url = item.get("store_url")
+        if store_url:
+            description_parts.append(f"URL Toko: {store_url}")
+
+        description = "\n".join(description_parts).strip() or "Tidak ada deskripsi."
+
+        price = KnowledgeBase._format_price(item)
+        sku = item.get("sku") or item.get("SKU") or item.get("id")
+        url = item.get("product_url") or item.get("url") or item.get("URL")
+
+        return Product(name=name, description=description, price=price, sku=sku, url=url)
+
+    @staticmethod
+    def _build_faq(item: Any) -> Optional[FAQ]:
+        if not isinstance(item, dict):
+            return None
+
+        question = item.get("question") or item.get("pertanyaan")
+        answer = item.get("answer") or item.get("jawaban")
+
+        if not question and not answer:
+            return None
+
+        return FAQ(question=str(question or "").strip(), answer=str(answer or "").strip())
+
+    @staticmethod
+    def _format_price(item: Dict[str, Any]) -> Optional[str]:
+        direct_price = (
+            item.get("price") or item.get("Harga") or item.get("product_price")
+        )
+        if direct_price:
+            return str(direct_price)
+
+        price_idr = item.get("price_idr")
+        if price_idr is not None:
+            if isinstance(price_idr, (int, float)):
+                formatted = f"{price_idr:,.0f}".replace(",", ".")
+            else:
+                formatted = str(price_idr)
+            currency = item.get("currency") or item.get("currency_code")
+            return f"{currency} {formatted}".strip() if currency else formatted
+
+        return None
 
 
 class RAGRetriever:
@@ -391,7 +473,7 @@ class CustomerServiceAgent:
             Kamu adalah agen layanan pelanggan untuk toko e-commerce di Indonesia.
             Jawablah selalu dalam Bahasa Indonesia dengan nada {self.tone.lower()}.
             Gunakan informasi pada bagian KONTEKS untuk memberikan jawaban yang akurat.
-            Jika informasinya tidak ada, jelaskan secara jujur dan tawarkan bantuan lanjutan.
+            Jika informasinya tidak ada, cari ulang terlebih dahulu berdasarkan nama produk atau kategori, dan bila masih tidak dapat ditemukan, jelaskan secara jujur dan tawarkan bantuan lanjutan.
             """
         ).strip()
 
