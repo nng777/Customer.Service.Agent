@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import textwrap
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -202,9 +203,20 @@ class CheckoutPlan:
 class KnowledgeBase:
     """In-memory storage for the product catalogue and FAQ documents."""
 
+    _TOKEN_PATTERN = re.compile(r"[^0-9a-zA-Z]+", re.UNICODE)
+
     def __init__(self, products: Sequence[Product], faqs: Sequence[FAQ]) -> None:
         self.products = list(products)
         self.faqs = list(faqs)
+
+        # Pre-compute lightweight indices to avoid repeated tokenisation work.
+        self._product_index: list[tuple[Product, set[str]]] = [
+            (product, self._tokenize(product.search_blob)) for product in self.products
+        ]
+        self._faq_index: list[tuple[FAQ, set[str]]] = [
+            (faq, self._tokenize(f"{faq.question} {faq.answer}")) for faq in self.faqs
+        ]
+
         LOGGER.debug(
             "Knowledge base initialized with %d products and %d FAQ entries",
             len(self.products),
@@ -303,54 +315,140 @@ class KnowledgeBase:
 
     def search(self, query: str, *, limit: int = 3) -> List[str]:
 
+        LOGGER.debug("Searching knowledge base for query: %s", query)
+
         candidates: List[str] = []
+        query_tokens = self._tokenize(query)
 
-        product_entries = [
-            (product, product.search_blob or product.name) for product in self.products
-        ]
-
-        faq_questions = [faq.question for faq in self.faqs]
-
-        product_corpus = [entry[1] for entry in product_entries]
-        product_matches = difflib.get_close_matches(query, product_corpus, n=limit, cutoff=0.1)
-        faq_matches = difflib.get_close_matches(query, faq_questions, n=limit, cutoff=0.1)
-
-        LOGGER.debug("Product matches: %s", product_matches)
-        LOGGER.debug("FAQ matches: %s", faq_matches)
-
-        seen_product_ids: set[int] = set()
-        for match in product_matches:
-            for product, corpus_text in product_entries:
-                if corpus_text == match and id(product) not in seen_product_ids:
-                    candidates.append(product.context)
-                    seen_product_ids.add(id(product))
-                    break
-
-        lower_query = query.lower()
-        for product, corpus_text in product_entries:
+        ranked_products = self.find_best_products(query, limit=limit * 2, query_tokens=query_tokens)
+        for product, score in ranked_products:
+            LOGGER.debug("Product candidate '%s' scored %.3f", product.name, score)
             if len(candidates) >= limit:
                 break
-            if id(product) in seen_product_ids:
-                continue
-            if lower_query in corpus_text.lower():
-                candidates.append(product.context)
-                seen_product_ids.add(id(product))
+            candidates.append(product.context)
 
-        for faq in self.faqs:
-            if faq.question in faq_matches:
+        if len(candidates) < limit:
+            ranked_faqs = self.find_best_faqs(query, limit=limit, query_tokens=query_tokens)
+            for faq, score in ranked_faqs:
+                LOGGER.debug("FAQ candidate '%s' scored %.3f", faq.question, score)
+                if len(candidates) >= limit:
+                    break
                 candidates.append(faq.context)
 
         if not candidates:
-            LOGGER.debug("No fuzzy matches found. Falling back to first items.")
-            for product, _ in product_entries[:limit]:
-                if id(product) not in seen_product_ids:
-                    candidates.append(product.context)
-                    seen_product_ids.add(id(product))
-            remaining = limit - len(candidates)
-            for faq in self.faqs[:remaining]:
-                candidates.append(faq.context)
+            LOGGER.debug("No matches found; returning top catalogue entries as fallback.")
+            for product in self.products[:limit]:
+                candidates.append(product.context)
+            if len(candidates) < limit:
+                candidates.extend(faq.context for faq in self.faqs[: limit - len(candidates)])
 
         return candidates[:limit]
+
+    def find_best_products(
+            self,
+            query: str,
+            *,
+            limit: int = 3,
+            query_tokens: Optional[Iterable[str]] = None,
+    ) -> List[Tuple[Product, float]]:
+        """Return the most relevant products for a query along with their scores."""
+
+        if not self._product_index:
+            return []
+
+        tokens = set(query_tokens) if query_tokens is not None else self._tokenize(query)
+        query_lower = query.lower().strip()
+
+        scored: list[tuple[Product, float]] = []
+        for product, product_tokens in self._product_index:
+            score = self._score_product(query_lower, tokens, product, product_tokens)
+            if score <= 0:
+                continue
+            scored.append((product, score))
+
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return scored[:limit]
+
+    def find_best_faqs(
+            self,
+            query: str,
+            *,
+            limit: int = 3,
+            query_tokens: Optional[Iterable[str]] = None,
+    ) -> List[Tuple[FAQ, float]]:
+        if not self._faq_index:
+            return []
+
+        tokens = set(query_tokens) if query_tokens is not None else self._tokenize(query)
+        query_lower = query.lower().strip()
+
+        scored: list[tuple[FAQ, float]] = []
+        for faq, faq_tokens in self._faq_index:
+            base_text = f"{faq.question} {faq.answer}".lower()
+            sequence_score = difflib.SequenceMatcher(None, query_lower, faq.question.lower()).ratio()
+            overlap = self._token_overlap(tokens, faq_tokens)
+            bonus = 0.1 if any(token in base_text for token in tokens) else 0.0
+            score = sequence_score * 0.6 + overlap * 0.4 + bonus
+            if score <= 0:
+                continue
+            scored.append((faq, min(score, 1.0)))
+
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return scored[:limit]
+
+    def _score_product(
+            self,
+            query_lower: str,
+            query_tokens: set[str],
+            product: Product,
+            product_tokens: set[str],
+    ) -> float:
+        fields = [
+            product.name,
+            product.brand,
+            product.category,
+            product.variant,
+            product.description[:200] if product.description else None,
+        ]
+
+        sequence_scores = [
+            difflib.SequenceMatcher(None, query_lower, field.lower()).ratio()
+            for field in fields
+            if field
+        ]
+
+        max_sequence = max(sequence_scores, default=0.0)
+        overlap = self._token_overlap(query_tokens, product_tokens)
+
+        bonus = 0.0
+        if product.brand and product.brand.lower() in query_lower:
+            bonus += 0.1
+        if product.category and product.category.lower() in query_lower:
+            bonus += 0.1
+        if product.id and product.id.lower() in query_lower:
+            bonus += 0.05
+
+        # Weighted combination keeps the score in [0, 1] while encouraging overlap.
+        score = max_sequence * 0.6 + overlap * 0.4 + bonus
+        return min(score, 1.0)
+
+    @classmethod
+    def _tokenize(cls, text: Optional[str]) -> set[str]:
+        if not text:
+            return set()
+        lowered = text.lower()
+        cleaned = cls._TOKEN_PATTERN.sub(" ", lowered)
+        tokens = {token for token in cleaned.split() if token}
+        return tokens
+
+    @staticmethod
+    def _token_overlap(left: Iterable[str], right: Iterable[str]) -> float:
+        left_set = set(left)
+        right_set = set(right)
+        if not left_set or not right_set:
+            return 0.0
+        intersection = left_set & right_set
+        return len(intersection) / len(left_set)
 
     @staticmethod
     def _parse_products_payload(payload: Any) -> List[Product]:
@@ -568,7 +666,7 @@ class CustomerServiceAgent:
             description, stock_status, dan last_updated.
             Saat menanggapi pelanggan, manfaatkan kolom-kolom tersebut untuk mencari
             produk yang relevan dan sebutkan detail penting seperti harga, brand,
-            kategori, status stok, serta tautan toko/produk jika tersedia.
+            kategori, status stok, serta URL toko atau produk jika tersedia.
             Jika informasinya tidak ada, cari ulang terlebih dahulu berdasarkan nama produk atau kategori, dan bila masih tidak dapat ditemukan, jelaskan secara jujur dan tawarkan bantuan lanjutan.
             """
         ).strip()
@@ -657,7 +755,7 @@ class AgenticPurchaseWorkflow:
             variant, price_idr, currency, marketplace, store_name, store_type,
             store_url, product_url, description, stock_status, dan last_updated.
             Gunakan kolom-kolom tersebut untuk memilih produk yang tepat dan cantumkan
-            detail penting seperti harga, status stok, tautan produk, dan informasi
+            detail penting seperti harga, status stok, URL produk/toko, dan informasi
             toko ketika relevan.
 
 
@@ -745,7 +843,7 @@ class AgenticPurchaseWorkflow:
             payment_method=payment_method or "Perlu memilih metode pembayaran.",
             next_steps=steps_list if steps_list else [
                 "Konfirmasi alamat dan kontak pelanggan.",
-                "Kirim tautan pembayaran kepada pelanggan.",
+                "Kirim URL pembayaran kepada pelanggan.",
             ],
             upsell=str(upsell).strip() if upsell else None,
             notes=notes or payment_notes,
@@ -830,17 +928,16 @@ class AgenticPurchaseWorkflow:
         )
 
     def _match_product(self, request: str) -> Product:
-        products = self.agent.retriever.knowledge_base.products
-        if not products:
-            return Product(name="Produk tidak ditemukan", description="")
+        kb = self.agent.retriever.knowledge_base
+        ranked = kb.find_best_products(request, limit=1)
+        if ranked:
+            return ranked[0][0]
 
-        names = [product.name for product in products]
-        matches = difflib.get_close_matches(request, names, n=1, cutoff=0.3)
-        if matches:
-            for product in products:
-                if product.name == matches[0]:
-                    return product
-        return products[0]
+        products = kb.products
+        if products:
+            return products[0]
+
+        return Product(name="Produk tidak ditemukan", description="")
 
 def configure_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
@@ -975,6 +1072,8 @@ def launch_gradio_app(
                         white-space: pre-wrap;
                         word-break: break-word;
                         margin: 0;
+                        text-align: justify;
+                        text-justify: inter-word;
                       }
                       @media print {
                         body {
